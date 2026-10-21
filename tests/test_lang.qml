@@ -85,6 +85,27 @@ QtObject {
     check("openai error", Lang.parseStreamLine('{"error":{"message":"bad"}}').error, "bad")
     check("garbage", Lang.parseStreamLine("<html>").delta, "")
 
+    // Structured text: rendered as a table or document, copied as written.
+    check("markdown table", Lang.isStructured("| a | b |\n|---|---|\n| 1 | 2 |"), true)
+    check("aligned table", Lang.isStructured("a | b\n:--- | ---:\n1 | 2"), true)
+    check("heading", Lang.isStructured("## Release\ntext"), true)
+    check("list", Lang.isStructured("- one\n- two"), true)
+    check("numbered list", Lang.isStructured("1. one\n2. two"), true)
+    check("code fence", Lang.isStructured("run this:\n```\nls\n```"), true)
+    check("spreadsheet rows", Lang.isStructured("名稱\t價格\n奶茶\t60"), true)
+    check("a sentence is not structured", Lang.isStructured("I think - maybe - we should go."), false)
+    check("one dash item is not", Lang.isStructured("- just a note"), false)
+    check("a hashtag is not a heading", Lang.isStructured("#trending now"), false)
+    check("ragged tabs are not rows", Lang.isTsv("a\tb\nc"), false)
+    check("one row is not rows", Lang.isTsv("a\tb"), false)
+    check("rows become a table", Lang.markdownPreview("名稱\t價格\n奶茶\t60\n"),
+          "| 名稱 | 價格 |\n| --- | --- |\n| 奶茶 | 60 |")
+    check("a pipe in a cell is escaped", Lang.tsvToMarkdown("a|b\tc\nd\te"), "| a\\|b | c |\n| --- | --- |\n| d | e |")
+    check("no html in the preview", Lang.markdownPreview('<img src="http://x/a.png"> <b>b</b>').indexOf("<i") === -1
+          && Lang.markdownPreview("<b>").indexOf("<b") === -1, true)
+    check("no images in the preview", Lang.markdownPreview("![a](http://x/a.png)").indexOf("![") === -1, true)
+    check("the preview keeps the text", Lang.markdownPreview("a <b> ![c](d)").replace(/​/g, ""), "a <b> ![c](d)")
+
     // Thinking blocks never reach the screen.
     check("closed think", Lang.stripThinking("<think>hmm</think>\nHello"), "Hello")
     check("open think", Lang.stripThinking("<think>still going"), "")

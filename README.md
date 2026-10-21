@@ -11,16 +11,24 @@ The models run in Ollama on your machine. The text never leaves it.
 | Key | Does |
 |---|---|
 | `SUPER + D` | translate the highlighted text; press again on the same text to close |
+| `SUPER + ALT + D` | open an empty input box to type or paste into (`Ctrl + V`); press again to close |
 | `Enter` or `c` | copy the answer and close |
 | `Ctrl + C` | copy only the part of the answer you selected |
 | `Tab` | switch between translate and explain |
 | `s` | swap the direction, when the language was guessed wrong |
 | `e` or `i` | edit the source text; `Enter` translates it, `Shift + Enter` adds a line |
+| `m` | for a table or Markdown answer, switch between the rendered view and the text as written |
 | `r` | ask the model again instead of using the cached answer |
 | `↑` `↓` or `k` `j` | scroll a long answer |
 | `Esc` or `q` | close |
 
-With nothing highlighted, the card opens as an input box and translates what you type.
+With nothing highlighted, `SUPER + D` opens the input box too.
+
+## Tables and Markdown
+
+Markdown tables, headings, lists and code blocks, and rows copied from a spreadsheet (tab-separated), come back in the same shape: Hy-MT2 keeps the Markdown syntax and the tabs; in testing it also left a `bash` code block as it was. The card renders such an answer as a table or a formatted document, 760 px wide. `Enter` copies the text as the model wrote it, so a Markdown table pastes as Markdown and spreadsheet rows paste back into the spreadsheet as cells. `m` shows that text instead of the rendered view.
+
+Qt's Markdown renderer loads `![images](http://…)` from the network and reads inline HTML such as `<img>`. Before rendering, Rosetta puts a zero-width space after every `<` and between `!` and `[`, which shows nothing and stops both, so a pasted table cannot make the card fetch a URL. `tests/live` checks this against a local listener.
 
 ## Which way it translates
 
@@ -53,7 +61,7 @@ omarchy plugin add https://github.com/leonrlr4/rosetta --enable
 hyprctl reload
 ```
 
-`scripts/setup` pulls both models (about 8 GB), enables the plugin and binds `SUPER + D`. It is safe to re-run. `--check` reports without changing anything, `--key "SUPER + ALT + T"` picks another key, and `--no-pull` skips the downloads. It refuses a key Hyprland already uses; if `SUPER + D` is taken, pick another with `--key`.
+`scripts/setup` pulls both models (about 8 GB), enables the plugin and binds `SUPER + D` and `SUPER + ALT + D` (`SUPER + SHIFT + D` is Omarchy's Docker key). It is safe to re-run. `--check` reports without changing anything, `--key "SUPER + ALT + T"` and `--input-key` pick other keys, and `--no-pull` skips the downloads. It refuses a key Hyprland already uses.
 
 ### On the GPU
 
@@ -86,7 +94,7 @@ Measured by `tests/live` on Intel Panther Lake (Arc B390 integrated graphics) wi
 ## Privacy and safety
 
 - The highlighted text reaches the card through a file only you can read (mode 600) in `$XDG_RUNTIME_DIR/leonrlr4.rosetta/`, which the card deletes once it has read it. The text is never on any process's command line, where other local users could read it in `/proc`. The request to Ollama and the input to OpenCC go through stdin too.
-- The card shows the source and the answer as plain text. HTML in either, such as `<img src=...>`, is not rendered and fetches nothing.
+- The card shows the source and the answer as plain text, except a table or Markdown answer, which it renders with images and HTML defused (see Tables and Markdown). Nothing in either fetches anything.
 - curl only speaks `http` and `https`, so an `endpoint` in config.json cannot point at `file://`.
 - Ollama listens on `127.0.0.1` by default. If you set `endpoint` to another machine, the text goes to that machine.
 

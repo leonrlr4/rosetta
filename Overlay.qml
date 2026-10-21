@@ -92,6 +92,8 @@ Item {
   property bool busy: false
   property bool editing: false
   property bool copied: false
+  // A table or Markdown answer is rendered; `m` shows the text as written.
+  property bool raw: false
   property real pointerX: -1
   property real pointerY: -1
   property string screenName: ""
@@ -99,6 +101,8 @@ Item {
   readonly property string to: Lang.target(root.from)
   readonly property var route: root.mode === "explain" ? root.config.explain : root.config.translate
   readonly property string shown: Lang.stripThinking(root.result)
+  readonly property bool structured: Lang.isStructured(root.source) || Lang.isStructured(root.shown)
+  readonly property bool rendered: root.structured && !root.raw && root.mode === "translate"
 
   // Timing, for the footer: how long until the first word, and how fast after.
   property double startedAt: 0
@@ -163,18 +167,21 @@ Item {
   function openWith(p, raw) {
     var text = String(raw || "").replace(/\r\n/g, "\n").trim().slice(0, 6000)
 
-    // The key pressed again over the same text puts the card away.
+    // The key pressed again over the same text puts the card away, and the
+    // input key pressed again over the empty input box.
     if (root.opened && text && text === root.source) { root.close(); return }
+    if (root.opened && !text && p.input && root.editing && !editor.text) { root.close(); return }
 
     root.pointerX = typeof p.x === "number" ? p.x : -1
     root.pointerY = typeof p.y === "number" ? p.y : -1
     root.screenName = p.screen || ""
     root.copied = false
+    root.raw = false
     root.editing = false
     root.opened = true
     root.mode = "translate"
     root.setSourceFresh(text)
-    if (!text) root.startEditing()
+    if (!text) { editor.text = ""; root.startEditing() }
     else Qt.callLater(function() { keys.forceActiveFocus() })
   }
 
@@ -195,6 +202,7 @@ Item {
                             firstTokenMs: root.firstAt ? root.firstAt - root.startedAt : 0,
                             totalMs: root.endedAt ? root.endedAt - root.startedAt : 0,
                             pending: root.proc !== null && root.proc.running,
+                            editing: root.editing, structured: root.structured, rendered: root.rendered,
                             card: { x: card.x, y: card.y, width: card.width, height: card.height } })
   }
 
@@ -476,7 +484,9 @@ Item {
 
     Rectangle {
       id: card
+      // Tables need the width more than a sentence does.
       readonly property real wantWidth: root.mode === "explain" ? 600
+        : root.structured || root.editing && editor.lineCount > 1 ? 760
         : Math.max(420, Math.min(640, 300 + Math.max(root.source.length, root.shown.length) * 4))
       width: Math.min(wantWidth, panel.width - panel.margin * 2)
       height: Math.min(content.implicitHeight + 36, panel.maxCardHeight)
@@ -616,7 +626,8 @@ Item {
         // ---- the source -------------------------------------------------
         Item {
           width: parent.width
-          height: root.editing ? Math.max(editor.contentHeight, 22) + 16 : sourceText.height
+          // A pasted table grows the box up to a point, then scrolls in it.
+          height: root.editing ? Math.min(Math.max(editor.contentHeight, 22), 260) + 16 : sourceText.height
 
           Text {
             id: sourceText
@@ -646,11 +657,26 @@ Item {
             border.width: 1
             border.color: editor.activeFocus ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.6) : root.hairline
 
+            Flickable {
+              id: editorFlick
+              x: 10; y: 8
+              width: parent.width - 20
+              height: parent.height - 16
+              contentHeight: editor.contentHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              function follow(r) {
+                if (r.y < contentY) contentY = r.y
+                else if (r.y + r.height > contentY + height) contentY = r.y + r.height - height
+              }
+
             TextEdit {
               id: editor
               textFormat: TextEdit.PlainText
-              x: 10; y: 8
-              width: parent.width - 20
+              width: editorFlick.width
+              onCursorRectangleChanged: editorFlick.follow(cursorRectangle)
+              // Spreadsheet rows pasted in keep their columns roughly lined up.
+              tabStopDistance: 96
               color: root.fg
               font.family: root.textFont
               font.pixelSize: 15
@@ -671,6 +697,7 @@ Item {
                   event.accepted = true
                 }
               }
+            }
             }
           }
         }
@@ -757,19 +784,23 @@ Item {
             // Keep the newest words in view while they stream in.
             onContentHeightChanged: if (root.busy && contentHeight > height) contentY = contentHeight - height
 
+            // Rendered, the answer goes through Lang.markdownPreview, which
+            // keeps Qt's Markdown renderer from fetching images or reading
+            // HTML in it. Every other text on the card is plain.
             TextEdit {
               id: resultText
-              textFormat: TextEdit.PlainText
+              textFormat: root.rendered ? TextEdit.MarkdownText : TextEdit.PlainText
               // Selecting part of the answer must not take the keys away
               // from the card: Esc, Enter and Ctrl+C would stop working.
               activeFocusOnPress: false
               width: flick.width
               readOnly: true
               selectByMouse: true
-              text: root.shown
+              text: root.rendered ? Lang.markdownPreview(root.shown) : root.shown
               color: root.fg
               font.family: root.textFont
-              font.pixelSize: root.mode === "explain" || root.shown.length > 160 ? 16 : 20
+              font.pixelSize: root.structured ? 15 : root.mode === "explain" || root.shown.length > 160 ? 16 : 20
+              tabStopDistance: 120
               wrapMode: TextEdit.Wrap
               selectionColor: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.4)
 
@@ -815,8 +846,10 @@ Item {
           Text {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            text: root.editing ? "⏎ 翻譯   ⇧⏎ 換行   esc 取消"
-                               : "⏎ 複製   tab 翻譯/解釋   s 對調   e 編輯   r 重來   esc"
+            text: root.editing ? "⏎ 翻譯   ⇧⏎ 換行   ctrl+v 貼上   esc 取消"
+                 : root.structured && root.mode === "translate"
+                   ? "⏎ 複製   m " + (root.raw ? "預覽" : "原始格式") + "   tab 翻譯/解釋   s 對調   e 編輯   r 重來   esc"
+                 : "⏎ 複製   tab 翻譯/解釋   s 對調   e 編輯   r 重來   esc"
             color: root.dimmer
             font.family: root.uiFont
             font.pixelSize: 11
@@ -856,7 +889,12 @@ Item {
           case Qt.Key_Return: case Qt.Key_Enter:
             root.copyAndClose(); break
           case Qt.Key_C:
-            if (ctrl && resultText.selectedText) { Quickshell.clipboardText = resultText.selectedText; root.copied = true }
+            if (ctrl && resultText.selectedText) {
+              // Without the zero-width spaces markdownPreview put in, and
+              // without the separators Qt puts between table cells.
+              Quickshell.clipboardText = resultText.selectedText.replace(/\u200b/g, "").replace(/[\ufdd0\ufdd1]/g, " ").replace(/\u2029/g, "\n")
+              root.copied = true
+            }
             else root.copyAndClose()
             break
           case Qt.Key_Tab: case Qt.Key_Backtab:
@@ -866,6 +904,9 @@ Item {
           case Qt.Key_R:
             var c = Object.assign({}, root.cache); delete c[root.cacheKey()]; root.cache = c
             root.run(); break
+          case Qt.Key_M:
+            if (root.structured) root.raw = !root.raw
+            break
           case Qt.Key_E: case Qt.Key_I:
             editor.text = root.source; root.startEditing(); break
           case Qt.Key_Up: case Qt.Key_K:

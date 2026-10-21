@@ -3,9 +3,10 @@
 #
 #   rosetta             translate the primary selection (the highlight)
 #   rosetta --clipboard translate the clipboard instead
+#   rosetta --input     open an empty input box to type or paste into
 #
-# Bound to a key by scripts/setup. With nothing highlighted the panel opens
-# empty and takes typed text.
+# Bound to keys by scripts/setup. With nothing highlighted the panel opens
+# as the input box too.
 set -uo pipefail
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/share/omarchy/bin"
 umask 077
@@ -25,7 +26,11 @@ fi
 # -t text: a highlighted image would otherwise arrive as bytes. The timeout
 # covers a selection owner that has gone away without releasing the
 # selection, when wl-paste waits forever for its bytes.
-if [[ "${1:-}" == "--clipboard" ]]; then
+input=false
+if [[ "${1:-}" == "--input" ]]; then
+  input=true
+  text=""
+elif [[ "${1:-}" == "--clipboard" ]]; then
   text=$(timeout 1 wl-paste -t text --no-newline 2>/dev/null)
 else
   text=$(timeout 1 wl-paste --primary -t text --no-newline 2>/dev/null)
@@ -48,16 +53,17 @@ printf '%s' "$text" > "$file"
 pos=$(hyprctl cursorpos -j 2>/dev/null)
 mons=$(hyprctl monitors -j 2>/dev/null)
 
-payload=$(jq -cn --arg file "$file" --argjson pos "${pos:-null}" --argjson mons "${mons:-[]}" '
+payload=$(jq -cn --arg file "$file" --argjson input "$input" --argjson pos "${pos:-null}" --argjson mons "${mons:-[]}" '
   ( ($mons | map(select($pos != null
         and $pos.x >= .x and $pos.x < .x + (.width / .scale)
         and $pos.y >= .y and $pos.y < .y + (.height / .scale))) | first)
     // ($mons | map(select(.focused)) | first) ) as $mon
   | {
       file: $file,
+      input: $input,
       screen: ($mon.name // ""),
       x: (if $pos and $mon then $pos.x - $mon.x else -1 end),
       y: (if $pos and $mon then $pos.y - $mon.y else -1 end)
-    }') || payload=$(jq -cn --arg file "$file" '{file: $file, screen: "", x: -1, y: -1}')
+    }') || payload=$(jq -cn --arg file "$file" --argjson input "$input" '{file: $file, input: $input, screen: "", x: -1, y: -1}')
 
 omarchy-shell -q shell summon "$ID" "$payload" || rm -f "$file"

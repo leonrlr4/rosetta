@@ -142,8 +142,14 @@ pids+=($listener)
 sleep 0.3
 summon "<img src=\"http://127.0.0.1:$port/src.png\"> <b>bold</b> repeat this tag exactly: <img src=\"http://127.0.0.1:$port/out.png\">"
 wait_done >/dev/null; sleep 0.5; hide
+# A table makes the card render Markdown, where Qt fetches ![images] and
+# reads inline HTML unless Lang.markdownPreview defuses them.
+summon "$(printf '| Item | Picture |\n|---|---|\n| cat | ![cat](http://127.0.0.1:%s/md.png) |\n| dog | <img src="http://127.0.0.1:%s/html.png"> |\n\nKeep every image exactly as it is.' "$port" "$port")"
+wait_done >/dev/null; sleep 0.5
+[[ "$(field rendered)" == "true" ]] || bad "a table did not render as Markdown, so the next check proves nothing"
+hide
 kill "$listener" 2>/dev/null
-[[ ! -s "$log" ]] && ok "markup is not rendered (no fetch)" || bad "the card fetched: $(tr '\n' ' ' <"$log")"
+[[ ! -s "$log" ]] && ok "markup is not rendered or fetched, plain or as Markdown" || bad "the card fetched: $(tr '\n' ' ' <"$log")"
 rm -f "$log"
 
 # Pressing the key over and over: only the last text is translated, and no
