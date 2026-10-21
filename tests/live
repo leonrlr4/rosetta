@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Performance and safety checks against the running shell and Ollama.
+#
+#   tests/live
+#
+# Unlike tests/run this needs the real thing: the plugin enabled in
+# omarchy-shell, Ollama up with both models pulled. It opens and closes the
+# card on screen a few times (about a minute) and reads its state through the
+# overlay's `inspect` IPC method rather than screenshots.
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/share/omarchy/bin"
+
+ID="leonrlr4.rosetta"
+OLLAMA="http://127.0.0.1:11434"
+fail=0
+ok()   { printf '  \033[32mok\033[0m   %s\n' "$1"; }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=1; }
+info() { printf '       %s\n' "$1"; }
+
+state() { omarchy-shell shell call "$ID" inspect x 2>/dev/null; }
+field() { state | jq -r ".$1"; }
+summon() { omarchy-shell -q shell summon "$ID" "$(jq -cn --arg t "$1" '{text: $t, screen: "", x: -1, y: -1}')" >/dev/null; }
+hide() { omarchy-shell -q shell hide "$ID" >/dev/null; }
+now_ms() { date +%s%3N; }
+
+# Waits until the card has stopped writing; prints how long that took.
+wait_done() {
+  local start=$(now_ms) limit=${1:-120000}
+  sleep 0.2
+  while [[ "$(field busy)" == "true" ]]; do
+    (( $(now_ms) - start > limit )) && { echo timeout; return 1; }
+    sleep 0.1
+  done
+  echo $(( $(now_ms) - start ))
+}
+
+curls() { pgrep -u "$UID" -x curl -a 2>/dev/null | grep -c -- "--url $OLLAMA" ; }
+
+[[ "$(state | jq -r .opened 2>/dev/null)" =~ ^(true|false)$ ]] ||
+  { echo "the overlay is not loaded; enable $ID and restart the shell" >&2; exit 1; }
+curl -sf "$OLLAMA/api/version" >/dev/null || { echo "Ollama is not running" >&2; exit 1; }
+
+# Two checks below swap config.json for a test one. The user's copy is put
+# back on any exit, Ctrl-C included.
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/$ID/config.json"
+backup=""
+[[ -f "$cfg" ]] && { backup=$(mktemp); cp "$cfg" "$backup"; }
+restore_cfg() { if [[ -n "$backup" ]]; then cp "$backup" "$cfg"; else rm -f "$cfg"; rmdir "$(dirname "$cfg")" 2>/dev/null; fi; }
+pids=()
+cleanup() { restore_cfg; [[ -n "$backup" ]] && rm -f "$backup"; for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; hide; }
+trap cleanup EXIT
+
+MT="hf.co/tencent/Hy-MT2-7B-GGUF:Q4_K_M"
+EX="qwen3.5:4b"
+unload() { curl -s "$OLLAMA/api/generate" -d "$(jq -cn --arg m "$1" '{model: $m, keep_alive: 0}')" >/dev/null; }
+
+echo "performance"
+
+# The hotkey path up to the shell taking the payload: wl-paste, hyprctl, jq.
+printf 'serendipity' | wl-copy --primary
+t0=$(now_ms); bin/rosetta; t1=$(now_ms)
+(( t1 - t0 < 300 )) && ok "hotkey script $((t1 - t0)) ms" || bad "hotkey script $((t1 - t0)) ms (over 300)"
+wait_done >/dev/null; hide
+
+unload "$MT"; unload "$EX"; sleep 1
+summon "The meeting has been moved to Thursday afternoon."
+cold=$(wait_done)
+r=$(state)
+[[ -n "$(jq -r .result <<<"$r")" ]] && ok "cold translate ${cold} ms (model load included): $(jq -r .result <<<"$r")" \
+  || bad "cold translate gave nothing: $(jq -r .error <<<"$r")"
+hide
+
+for t in "Can you send me the slides before lunch?" "我等一下再回你訊息" "This is way better than I expected."; do
+  summon "$t"; total=$(wait_done); r=$(state)
+  ttft=$(jq -r .firstTokenMs <<<"$r")
+  (( ttft < 1500 )) && ok "warm translate first token ${ttft} ms, done ${total} ms: $(jq -r .result <<<"$r")" \
+    || bad "warm translate first token ${ttft} ms (over 1500)"
+  hide
+done
+
+summon "No cap"
+omarchy-shell -q shell call "$ID" setMode explain >/dev/null
+total=$(wait_done 180000); r=$(state)
+[[ -n "$(jq -r .result <<<"$r")" ]] && ok "explain (model load included) ${total} ms, first token $(jq -r .firstTokenMs <<<"$r") ms" \
+  || bad "explain gave nothing: $(jq -r .error <<<"$r")"
+hide
+
+echo "memory"
+ollama ps | tail -n +2 | while read -r name _ size unit share proc _; do info "$name: $size $unit, $share $proc"; done
+shell_pid=$(pgrep -u "$UID" -f 'quickshell .*-p /usr/share/omarchy/shell' | head -1)
+info "omarchy shell (quickshell) RSS $(ps -o rss= -p "$shell_pid" | awk '{printf "%.0f MB", $1/1024}')"
+
+echo "idle cost"
+# The card's animations are bound to being open; closed, the shell should be
+# where it was before the plugin existed.
+sleep 1
+cpu_over() { local a b; a=$(awk '{print $14+$15}' /proc/$shell_pid/stat); sleep "$1"; b=$(awk '{print $14+$15}' /proc/$shell_pid/stat); echo $(( (b - a) * 100 / $(getconf CLK_TCK) / ${1%.*} )); }
+closed=$(cpu_over 3)
+summon "Keep this open for a moment."; wait_done >/dev/null
+open=$(cpu_over 3)
+hide
+info "shell CPU closed ${closed}%, open and idle ${open}%"
+(( closed <= 5 )) && ok "nothing running while closed" || bad "shell uses ${closed}% CPU with the card closed"
+
+echo "safety"
+
+# The selected text must never be in a command line, which every local user
+# can read through /proc. Sampled from before the key is pressed until the
+# answer is done, so the hotkey script, jq, omarchy-shell and its IPC client
+# are all covered, not only the request.
+marker="ROSETTA_ARGV_$$"
+printf '%s please translate this sentence into Chinese' "$marker" | wl-copy --primary
+seen=$(mktemp)
+pattern=$(mktemp); printf '%s\n' "$marker" > "$pattern"   # -f, so grep's own argv does not match
+( end=$((SECONDS + 15)); while ((SECONDS < end)); do
+    grep -l -a -F -f "$pattern" /proc/[0-9]*/cmdline 2>/dev/null >> "$seen"; done ) &
+sampler=$!
+sleep 0.2
+bin/rosetta
+wait_done >/dev/null
+kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
+hide
+[[ ! -s "$seen" ]] && ok "selected text never appears in any process's argv" \
+  || bad "selected text was in argv of: $(sort -u "$seen" | while read -r f; do tr '\0' ' ' < "$f" 2>/dev/null | cut -c1-80; done | head -3)"
+rm -f "$seen" "$pattern"
+left=$(ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/$ID/" 2>/dev/null | wc -l)
+((left == 0)) && ok "the selection file is deleted once read" || bad "$left selection file(s) left in the runtime dir"
+
+# Markup in the selection or the answer is shown as text, never fetched.
+port=11998
+log=$(mktemp)
+python3 -I -c "
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        open(sys.argv[1], 'a').write(self.path + '\n'); self.send_response(404); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $port), H).serve_forever()" "$log" &
+listener=$!
+pids+=($listener)
+sleep 0.3
+summon "<img src=\"http://127.0.0.1:$port/src.png\"> <b>bold</b> repeat this tag exactly: <img src=\"http://127.0.0.1:$port/out.png\">"
+wait_done >/dev/null; sleep 0.5; hide
+kill "$listener" 2>/dev/null
+[[ ! -s "$log" ]] && ok "markup is not rendered (no fetch)" || bad "the card fetched: $(tr '\n' ' ' <"$log")"
+rm -f "$log"
+
+# Pressing the key over and over: only the last text is translated, and no
+# request is left running behind it.
+for i in $(seq 1 8); do summon "rapid press number $i"; sleep 0.05; done
+wait_done >/dev/null
+[[ "$(field source)" == "rapid press number 8" ]] && ok "rapid presses end on the last text" || bad "rapid presses ended on: $(field source)"
+sleep 0.3
+n=$(curls)
+((n == 0)) && ok "no requests left over after rapid presses" || bad "$n curl process(es) left over"
+hide
+
+# Closing mid-answer stops the request.
+summon "$(printf 'Translate this long paragraph about nothing in particular. %.0s' $(seq 1 30))"
+sleep 1.2
+hide
+sleep 0.4
+n=$(curls)
+((n == 0)) && ok "closing mid-answer stops the request" || bad "$n curl process(es) still running after close"
+
+# Simplified characters from the model are shown in Traditional ones, also
+# when one answer follows another faster than OpenCC finishes. A fake model
+# answers in Simplified so the result does not depend on what Hy-MT2 writes.
+fake=11997
+python3 -I -c "
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        word = body['messages'][-1]['content'].split()[-1]
+        self.send_response(200); self.end_headers()
+        for ch in ['作为', '测试', word]:
+            self.wfile.write((json.dumps({'message': {'content': ch}, 'done': False}) + '\\n').encode())
+        self.wfile.write(b'{\"done\": true}\\n')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $fake), H).serve_forever()" &
+pids+=($!)
+mkdir -p "$(dirname "$cfg")"
+echo "{\"translate\": {\"endpoint\": \"http://127.0.0.1:$fake/api/chat\", \"style\": \"chat\"}}" > "$cfg"
+sleep 0.3
+summon "first one"; sleep 0.05; summon "second two"
+wait_done >/dev/null; sleep 0.6
+res=$(field result)
+hide
+[[ "$res" == "作為測試two" ]] && ok "simplified output shown as traditional, last answer kept: $res" \
+  || bad "expected 作為測試two, got: $res"
+
+# An endpoint in config.json cannot point curl at the filesystem.
+echo '{"translate": {"endpoint": "file:///etc/passwd"}}' > "$cfg"
+summon "protocol check"; wait_done >/dev/null
+err=$(field error); res=$(field result)
+hide
+restore_cfg
+[[ "$res" != *root:* && -n "$err" ]] && ok "file:// endpoint refused: ${err%%$'\n'*}" || bad "file:// endpoint was read"
+
+# Ollama itself must only listen on this machine.
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):11434$'; then
+  bad "Ollama listens on all interfaces: the models are reachable from the network"
+else
+  ok "Ollama listens on localhost only"
+fi
+
+exit $fail

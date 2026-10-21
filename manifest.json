@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "leonrlr4.rosetta",
+  "name": "Rosetta",
+  "version": "0.1.0",
+  "author": "leonrlr4",
+  "license": "MIT",
+  "description": "Highlight text anywhere and press a key: a local LLM translates it between Chinese and English beside the pointer, or explains it like a tutor. Runs on Ollama on this machine; nothing leaves it.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml"
+  }
+}

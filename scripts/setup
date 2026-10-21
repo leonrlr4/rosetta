@@ -1,0 +1,184 @@
+#!/usr/bin/bash
+# Install what Rosetta needs outside its own folder, and say what it changed.
+#
+#   scripts/setup [--check] [--key "SUPER + D"] [--no-key] [--no-pull]
+#
+# Each step is checked before it is changed, so this can be re-run at any
+# time and --check changes nothing (exit 1 when something is missing):
+#
+#   1. Ollama installed and its service running
+#   2. the translation and explain models pulled (about 8 GB together)
+#   3. the plugin enabled in the Omarchy shell
+#   4. a key in ~/.config/hypr/bindings.lua that runs bin/rosetta
+#
+# Installing Ollama needs root, so step 1 only says what to run.
+set -uo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/share/omarchy/bin"
+
+ID="leonrlr4.rosetta"
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+BINDINGS="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/bindings.lua"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/$ID/config.json"
+# Bound through the plugin folder, not this checkout, so the key keeps
+# working when the plugin is updated or reinstalled in place.
+LAUNCH="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID/bin/rosetta"
+# The path goes into a Lua string in bindings.lua and from there into a shell
+# command, single-quoted. A quote, backslash or newline in it would break out
+# of one or the other, so such a path is refused rather than escaped.
+case "$LAUNCH" in
+  *[\'\"\\]*|*$'\n'*) echo "setup: cannot bind a key for a plugin path containing quotes or backslashes: $LAUNCH" >&2; exit 1 ;;
+esac
+
+CHECK=0
+KEY="SUPER + D"
+WANT_KEY=1
+WANT_PULL=1
+
+need_value() { (($# >= 2)) || { echo "setup: $1 needs a value" >&2; exit 2; }; }
+while (($#)); do
+  case "$1" in
+    --check) CHECK=1; shift ;;
+    --key) need_value "$@"; KEY="$2"; shift 2 ;;
+    --no-key) WANT_KEY=0; shift ;;
+    --no-pull) WANT_PULL=0; shift ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    *) echo "setup: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+# The key goes verbatim into a quoted Lua string; only Hyprland's key grammar
+# is let through, so nothing can close the string or break the file.
+if [[ ! "$KEY" =~ ^[A-Za-z0-9_]+([[:blank:]]*\+[[:blank:]]*[A-Za-z0-9_]+)*$ ]]; then
+  echo "setup: not a valid key: $KEY (expected something like \"SUPER + D\")" >&2
+  exit 2
+fi
+
+missing=0
+changed=0
+ok()     { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+did()    { printf '  \033[33m→\033[0m %s\n' "$1"; changed=$((changed + 1)); }
+absent() { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; missing=$((missing + 1)); }
+note()   { printf '    %s\n' "$1"; }
+
+for tool in curl jq wl-paste hyprctl; do
+  command -v "$tool" >/dev/null || { echo "setup: $tool is required" >&2; exit 1; }
+done
+command -v opencc >/dev/null ||
+  note "opencc is not installed: Chinese answers are shown as the model wrote them, Simplified slips included"
+
+# The models the overlay will ask for: config.json's, else the defaults in
+# Overlay.qml. Kept in step with those by tests/test_scripts.sh.
+model_of() {
+  local route=$1 fallback=$2 m=""
+  [[ -f "$CONFIG" ]] && m=$(jq -r --arg r "$route" '.[$r].model // empty' "$CONFIG" 2>/dev/null)
+  printf '%s' "${m:-$fallback}"
+}
+TRANSLATE_MODEL=$(model_of translate "hf.co/tencent/Hy-MT2-7B-GGUF:Q4_K_M")
+EXPLAIN_MODEL=$(model_of explain "qwen3.5:4b")
+
+# The Ollama the overlay will call: the translate endpoint's host, when it is
+# Ollama's native /api/chat. Anything else (llama-server, LM Studio) is not
+# Ollama, so setup neither checks nor pulls for it.
+ENDPOINT="http://127.0.0.1:11434/api/chat"
+[[ -f "$CONFIG" ]] && ENDPOINT=$(jq -r --arg d "$ENDPOINT" '.translate.endpoint // $d' "$CONFIG" 2>/dev/null || echo "$ENDPOINT")
+OLLAMA_URL=""
+[[ "$ENDPOINT" =~ ^(https?://[^/]+)/api/chat/?$ ]] && OLLAMA_URL="${BASH_REMATCH[1]}"
+
+# --- 1. Ollama --------------------------------------------------------------
+running=0
+if [[ -z "$OLLAMA_URL" ]]; then
+  ok "translate endpoint is not Ollama ($ENDPOINT); skipping the Ollama checks"
+  WANT_PULL=0
+elif ! command -v ollama >/dev/null; then
+  absent "ollama is not installed"
+  note "install it with GPU support:  sudo pacman -S --needed ollama ollama-vulkan"
+  note "then start it:                sudo systemctl enable --now ollama"
+elif curl -sf --max-time 2 "$OLLAMA_URL/api/version" >/dev/null; then
+  ok "ollama is running ($(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1))"
+  running=1
+  pacman -Q ollama-vulkan >/dev/null 2>&1 ||
+    note "ollama-vulkan is not installed: models will run on the CPU, several times slower"
+  # Ollama drops integrated GPUs unless told otherwise, and on a laptop that
+  # is usually the only GPU: 8 tok/s on the CPU against 24 on an Arc B390.
+  if lspci 2>/dev/null | grep -qiE '(vga|3d).*intel' &&
+     ! systemctl show ollama -p Environment 2>/dev/null | grep -q OLLAMA_IGPU_ENABLE=1; then
+    note "Ollama skips integrated GPUs by default. To use the Intel one:"
+    note "  sudo mkdir -p /etc/systemd/system/ollama.service.d"
+    note "  printf '[Service]\nEnvironment=OLLAMA_IGPU_ENABLE=1\n' | sudo tee /etc/systemd/system/ollama.service.d/igpu.conf"
+    note "  sudo systemctl daemon-reload && sudo systemctl restart ollama"
+  fi
+else
+  absent "ollama is installed but not answering at $OLLAMA_URL"
+  note "start it:  sudo systemctl enable --now ollama"
+fi
+
+# --- 2. models --------------------------------------------------------------
+if ((running && WANT_PULL)); then
+  for model in "$TRANSLATE_MODEL" "$EXPLAIN_MODEL"; do
+    if curl -sf --max-time 5 "$OLLAMA_URL/api/show" -d "$(jq -cn --arg m "$model" '{model: $m}')" >/dev/null; then
+      ok "model $model"
+    elif ((CHECK)); then
+      absent "model $model is not pulled"
+    else
+      note "pulling $model…"
+      if OLLAMA_HOST="$OLLAMA_URL" ollama pull "$model"; then did "pulled $model"; else absent "could not pull $model"; fi
+    fi
+  done
+fi
+
+# --- 3. enabled in the shell ------------------------------------------------
+state=$(omarchy plugin list 2>/dev/null | awk -v id="$ID" '$1 == id { print $2 }')
+case "$state" in
+  enabled) ok "plugin enabled" ;;
+  disabled)
+    if ((CHECK)); then absent "plugin is disabled: the key is bound but opens nothing"
+    elif omarchy plugin enable "$ID" >/dev/null 2>&1; then did "enabled the plugin"
+    else absent "could not enable the plugin"
+    fi ;;
+  *) absent "plugin is not installed: link or clone it into ~/.config/omarchy/plugins/$ID"; exit 1 ;;
+esac
+
+# --- 4. the key -------------------------------------------------------------
+if ((WANT_KEY)); then
+  if [[ ! -f "$BINDINGS" ]]; then
+    absent "no $BINDINGS to bind a key in"
+  elif grep -q "$ID/bin/rosetta" "$BINDINGS"; then
+    ok "bound to a key in bindings.lua"
+  elif ((CHECK)); then
+    absent "no key bound in bindings.lua"
+  else
+    # Refuse a key Hyprland already uses: a second bind on it fires both.
+    want_key=$(tr '[:lower:]' '[:upper:]' <<<"${KEY##*+}" | tr -d ' ')
+    mask=0
+    if [[ "$KEY" == *+* ]]; then
+      IFS=+ read -ra mods <<<"$(tr '[:lower:]' '[:upper:]' <<<"${KEY% + *}" | tr -d ' ')"
+      for m in "${mods[@]}"; do
+        case "$m" in
+          SHIFT) mask=$((mask | 1)) ;; CTRL|CONTROL) mask=$((mask | 4)) ;;
+          ALT) mask=$((mask | 8)) ;; SUPER|WIN|LOGO|MOD4) mask=$((mask | 64)) ;;
+        esac
+      done
+    fi
+    taken=$(hyprctl binds -j 2>/dev/null | jq -r --argjson m "$mask" --arg k "$want_key" \
+      '.[] | select(.modmask == $m and (.key | ascii_upcase) == $k) | .description // .arg' | head -1)
+    if [[ -n "$taken" ]]; then
+      absent "$KEY is already bound ($taken); pick another with --key"
+    else
+      {
+        printf '\n-- Rosetta: translate the highlighted text.\n'
+        printf '%s\n' "o.bind(\"$KEY\", \"Translate selection\", \"'$LAUNCH'\")"
+      } >> "$BINDINGS"
+      did "bound $KEY in bindings.lua"
+      note "run 'hyprctl reload' to pick it up"
+    fi
+  fi
+fi
+
+echo
+if ((missing)); then
+  if ((CHECK)); then echo "$missing thing(s) missing. Run scripts/setup to apply them." >&2
+  else echo "$missing thing(s) could not be applied." >&2
+  fi
+  exit 1
+fi
+if ((changed)); then echo "Applied $changed change(s)."; else echo "Nothing to do."; fi

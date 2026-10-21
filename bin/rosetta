@@ -1,0 +1,63 @@
+#!/usr/bin/bash
+# Open Rosetta on whatever is highlighted, next to the pointer.
+#
+#   rosetta             translate the primary selection (the highlight)
+#   rosetta --clipboard translate the clipboard instead
+#
+# Bound to a key by scripts/setup. With nothing highlighted the panel opens
+# empty and takes typed text.
+set -uo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/share/omarchy/bin"
+umask 077
+
+ID="leonrlr4.rosetta"
+# Longer than a few pages is not a selection anyone meant to translate in a
+# popup, and it would fill the model's context.
+MAX_CHARS=6000
+
+# Hyprland does not export WAYLAND_DISPLAY to the commands it binds, and
+# wl-paste then tries wayland-0, which is often not the session's socket.
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  sock=$(ls -t "${XDG_RUNTIME_DIR:-/run/user/$UID}"/wayland-[0-9]* 2>/dev/null | grep -v '\.lock$' | head -n1)
+  [[ -n "$sock" ]] && export WAYLAND_DISPLAY="${sock##*/}"
+fi
+
+# -t text: a highlighted image would otherwise arrive as bytes. The timeout
+# covers a selection owner that has gone away without releasing the
+# selection, when wl-paste waits forever for its bytes.
+if [[ "${1:-}" == "--clipboard" ]]; then
+  text=$(timeout 1 wl-paste -t text --no-newline 2>/dev/null)
+else
+  text=$(timeout 1 wl-paste --primary -t text --no-newline 2>/dev/null)
+fi
+text=${text:0:MAX_CHARS}
+
+# The text reaches the overlay through a file only this user can read, never
+# through argv: jq, omarchy-shell and the qs IPC client it runs would each
+# carry it on their command lines, which every local user can read in /proc.
+# The overlay deletes the file once it has read it.
+dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/$ID"
+mkdir -p "$dir" && chmod 700 "$dir"
+file=$(mktemp "$dir/selection.XXXXXX") || exit 1
+printf '%s' "$text" > "$file"
+
+# Where the pointer is, relative to the monitor it is on, in that monitor's
+# logical pixels: what the panel's coordinates are measured in. The monitor
+# under the pointer, not the focused one: with follow_mouse off they differ,
+# and the offset would be measured from the wrong corner.
+pos=$(hyprctl cursorpos -j 2>/dev/null)
+mons=$(hyprctl monitors -j 2>/dev/null)
+
+payload=$(jq -cn --arg file "$file" --argjson pos "${pos:-null}" --argjson mons "${mons:-[]}" '
+  ( ($mons | map(select($pos != null
+        and $pos.x >= .x and $pos.x < .x + (.width / .scale)
+        and $pos.y >= .y and $pos.y < .y + (.height / .scale))) | first)
+    // ($mons | map(select(.focused)) | first) ) as $mon
+  | {
+      file: $file,
+      screen: ($mon.name // ""),
+      x: (if $pos and $mon then $pos.x - $mon.x else -1 end),
+      y: (if $pos and $mon then $pos.y - $mon.y else -1 end)
+    }') || payload=$(jq -cn --arg file "$file" '{file: $file, screen: "", x: -1, y: -1}')
+
+omarchy-shell -q shell summon "$ID" "$payload" || rm -f "$file"
