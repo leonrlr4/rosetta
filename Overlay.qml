@@ -25,7 +25,7 @@ Item {
   // Defaults, overlaid key by key with config.json. Translation goes to a
   // model trained only to translate; explaining needs a general one.
   readonly property var defaults: ({
-    font: "LXGW WenKai TC",
+    font: "Noto Sans CJK TC",
     tone: "casual",           // or "formal"
     translate: {
       endpoint: "http://127.0.0.1:11434/api/chat",

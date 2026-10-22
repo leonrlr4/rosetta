@@ -121,7 +121,7 @@ An `endpoint` ending in `/api/chat` uses Ollama's native API, which is what lets
 
 If the 7B model is too slow, Hy-MT2 1.8B is 1.1 GB and takes the same prompt.
 
-The font is LXGW WenKai TC. Without it installed, fontconfig picks a substitute; `font` takes any installed family.
+The font is Noto Sans CJK TC (`noto-fonts-cjk` on Arch). Without it installed, fontconfig picks a substitute; `font` takes any installed family, such as LXGW WenKai TC in the example above.
 
 ## Development
 
