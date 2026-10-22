@@ -78,6 +78,18 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 
 `ollama ps` should then show `100% GPU` under PROCESSOR. On an Arc B390, the 7B model generates 8 tokens/s on the CPU and 24 on the GPU.
 
+## Uninstall
+
+```bash
+omarchy plugin remove leonrlr4.rosetta
+```
+
+Then delete the two `o.bind(...)` lines that `scripts/setup` added to `~/.config/hypr/bindings.lua` (they run `leonrlr4.rosetta/bin/rosetta`) and run `hyprctl reload`. Rosetta's other files are `~/.config/leonrlr4.rosetta/config.json`, if you made one, and nothing else. To free the disk space the models take:
+
+```bash
+ollama rm hf.co/tencent/Hy-MT2-7B-GGUF:Q4_K_M qwen3.5:4b
+```
+
 ## Performance
 
 Measured by `tests/live` on Intel Panther Lake (Arc B390 integrated graphics) with 62 GB of RAM:
